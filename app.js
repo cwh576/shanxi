@@ -61,6 +61,13 @@
   let lastExportUrl = '';
   let ocrWorkerPromise = null;
   let splitMonthDragIndex = null;
+  let remoteSaveTimer = null;
+  let remoteSyncing = false;
+  let remoteReady = false;
+  let remoteLoaded = false;
+  let remoteLoadPromise = null;
+  let remoteStatus = '正在连接云端数据…';
+  let remoteAccessToken = readRemoteAccessToken();
   const TABLE_PREVIEW_LIMIT = 1000;
   const CHART_SERIES_LIMIT = 80;
 
@@ -71,6 +78,7 @@
   bindGlobalEvents();
   window.addEventListener('beforeunload', flushPersist);
   render();
+  startRemoteSync();
 
   function clone(v) {
     return JSON.parse(JSON.stringify(v || {}));
@@ -118,6 +126,12 @@
   function persistDataNow() {
     safeSetItem(UI_STORAGE_KEY, JSON.stringify(state.ui));
     safeSetItem(DATA_STORAGE_KEY, JSON.stringify(state.data));
+    queueRemoteSave();
+  }
+
+  function persistDataLocally() {
+    safeSetItem(UI_STORAGE_KEY, JSON.stringify(state.ui));
+    safeSetItem(DATA_STORAGE_KEY, JSON.stringify(state.data));
   }
 
   function flushPersist() {
@@ -137,6 +151,182 @@
       }
       console.warn(err);
     }
+  }
+
+  function supabaseConfig() {
+    const config = window.SUPABASE_CONFIG || {};
+    if (!config.url || !config.publishableKey || !config.table || !config.rowId) return null;
+    return config;
+  }
+
+  function readRemoteAccessToken() {
+    try {
+      return sessionStorage.getItem('shanxi-supabase-access-token') || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function writeRemoteAccessToken(value) {
+    try {
+      if (value) sessionStorage.setItem('shanxi-supabase-access-token', value);
+      else sessionStorage.removeItem('shanxi-supabase-access-token');
+    } catch (_) {}
+  }
+
+  function remoteHeaders(withJson = false) {
+    const config = supabaseConfig();
+    const token = remoteAccessToken || config?.publishableKey || '';
+    return {
+      apikey: config?.publishableKey || '',
+      Authorization: `Bearer ${token}`,
+      ...(withJson ? { 'Content-Type': 'application/json' } : {})
+    };
+  }
+
+  async function supabaseFetch(path, options = {}) {
+    const config = supabaseConfig();
+    if (!config) throw new Error('未配置 Supabase');
+    const response = await fetch(`${config.url}${path}`, {
+      ...options,
+      headers: { ...remoteHeaders(Boolean(options.body)), ...(options.headers || {}) }
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(detail || `云端请求失败（${response.status}）`);
+    }
+    const text = await response.text();
+    if (!text.trim()) return null;
+    try {
+      return JSON.parse(text);
+    } catch (err) {
+      throw new Error(`云端返回了无法解析的数据：${err?.message || err}`);
+    }
+  }
+
+  function startRemoteSync() {
+    remoteLoadPromise = loadRemoteData();
+    return remoteLoadPromise;
+  }
+
+  async function loadRemoteData() {
+    const config = supabaseConfig();
+    if (!config) {
+      remoteReady = true;
+      remoteLoaded = true;
+      remoteStatus = '未配置云端数据';
+      return;
+    }
+    remoteSyncing = true;
+    remoteReady = false;
+    remoteLoaded = false;
+    remoteStatus = '正在读取云端最新数据…';
+    scheduleRender();
+    try {
+      const rows = await supabaseFetch(`/rest/v1/${encodeURIComponent(config.table)}?id=eq.${encodeURIComponent(config.rowId)}&select=id,payload,updated_at`);
+      const row = Array.isArray(rows) ? rows[0] : null;
+      if (row?.payload && typeof row.payload === 'object') {
+        state.data = merge(clone(defaults), row.payload);
+        ensureDataShape();
+        ensureSelections();
+        invalidateDataCache();
+        persistDataLocally();
+        remoteStatus = `已同步云端数据${row.updated_at ? `（${formatRemoteTime(row.updated_at)}）` : ''}`;
+      } else {
+        remoteStatus = '云端还没有共享数据，当前使用内置数据';
+      }
+      remoteReady = true;
+      remoteLoaded = true;
+    } catch (err) {
+      remoteReady = true;
+      remoteLoaded = false;
+      remoteStatus = `云端读取失败：${err?.message || err}`;
+      console.warn(err);
+    } finally {
+      remoteSyncing = false;
+      scheduleRender();
+    }
+  }
+
+  async function ensureRemoteDataReady() {
+    if (!supabaseConfig()) return;
+    if (!remoteReady) await (remoteLoadPromise || startRemoteSync());
+    if (!remoteLoaded) {
+      throw new Error('云端历史数据尚未成功读取。请先登录云端或点击“立即同步”重新读取，避免覆盖已有月份数据。');
+    }
+  }
+
+  function queueRemoteSave() {
+    if (!remoteReady || !remoteLoaded || remoteSyncing) return;
+    clearTimeout(remoteSaveTimer);
+    remoteSaveTimer = setTimeout(() => saveRemoteData().catch((err) => {
+      remoteStatus = `云端保存失败：${err?.message || err}`;
+      scheduleRender();
+    }), 800);
+  }
+
+  async function saveRemoteData() {
+    const config = supabaseConfig();
+    if (!config) return;
+    await ensureRemoteDataReady();
+    if (!remoteAccessToken) {
+      remoteStatus = '本地已保存；请在设置中登录云端后同步';
+      scheduleRender();
+      return;
+    }
+    remoteSyncing = true;
+    remoteStatus = '正在保存到云端…';
+    scheduleRender();
+    try {
+      await supabaseFetch(`/rest/v1/${encodeURIComponent(config.table)}?on_conflict=id`, {
+        method: 'POST',
+        headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify({
+          id: config.rowId,
+          payload: state.data,
+          updated_at: new Date().toISOString()
+        })
+      });
+      remoteStatus = `云端已更新（${formatRemoteTime(new Date().toISOString())}）`;
+    } finally {
+      remoteSyncing = false;
+      scheduleRender();
+    }
+  }
+
+  function formatRemoteTime(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value || '');
+    return date.toLocaleString('zh-CN', { hour12: false });
+  }
+
+  async function loginRemote() {
+    const email = byId('remoteEmail')?.value.trim();
+    const password = byId('remotePassword')?.value || '';
+    if (!email || !password) {
+      alert('请输入云端账号和密码');
+      return;
+    }
+    const config = supabaseConfig();
+    if (!config) return;
+    const response = await fetch(`${config.url}/auth/v1/token?grant_type=password`, {
+      method: 'POST',
+      headers: { apikey: config.publishableKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const result = await response.json();
+    if (!response.ok || !result.access_token) throw new Error(result.error_description || result.msg || '云端登录失败');
+    remoteAccessToken = result.access_token;
+    writeRemoteAccessToken(remoteAccessToken);
+    remoteStatus = `云端已登录：${email}`;
+    scheduleRender();
+  }
+
+  function logoutRemote() {
+    remoteAccessToken = '';
+    writeRemoteAccessToken('');
+    remoteStatus = '已退出云端登录';
+    scheduleRender();
   }
 
   function scheduleRender() {
@@ -1272,6 +1462,31 @@
     });
   }
 
+  function mergeLoadRecordsByUserDate(existingRecords, importedRecords) {
+    const byUserAndDate = new Map();
+    for (const row of combineLoadRecordsByUserDate(existingRecords || [])) {
+      byUserAndDate.set(`${row.userName}__${row.date}`, row);
+    }
+    for (const row of combineLoadRecordsByUserDate(importedRecords || [])) {
+      // A newly imported workbook is the authoritative value for matching days.
+      byUserAndDate.set(`${row.userName}__${row.date}`, row);
+    }
+    return sortLoadRecordsByUserDate([...byUserAndDate.values()]);
+  }
+
+  function mergeMonthlyEntries(existingEntries, importedEntries) {
+    const byMonth = new Map();
+    for (const item of existingEntries || []) {
+      const month = normalizeMonthValue(item?.month || '');
+      if (month) byMonth.set(month, { ...item, month });
+    }
+    for (const item of importedEntries || []) {
+      const month = normalizeMonthValue(item?.month || '');
+      if (month) byMonth.set(month, { ...item, month });
+    }
+    return [...byMonth.values()].sort((a, b) => String(a.month).localeCompare(String(b.month)));
+  }
+
   function aggregateLoad(records) {
     if (cache.loadRecordsRef === records && cache.loadRecordsLength === records.length) return cache.loadAggregated;
     cache.loadRecordsRef = records;
@@ -1289,18 +1504,33 @@
   }
 
   function settingsModal() {
+    const cloudManaged = Boolean(supabaseConfig());
+    const dataReady = !cloudManaged || remoteLoaded;
     return `
       <div class="modal-backdrop" id="settingsBackdrop">
         <div class="modal">
           <h4>设置</h4>
           ${state.settingsUnlocked ? `
-            <div class="tabs" style="margin-bottom:12px;">
-              <button type="button" data-settings-tab="load" class="${state.settingsTab === 'load' ? 'active' : ''}">用户数据导入</button>
-              <button type="button" data-settings-tab="long" class="${state.settingsTab === 'long' ? 'active' : ''}">中长期数据</button>
-              <button type="button" data-settings-tab="agent" class="${state.settingsTab === 'agent' ? 'active' : ''}">国网代购价数据</button>
-              <button type="button" data-settings-tab="split" class="${state.settingsTab === 'split' ? 'active' : ''}">市场分摊</button>
+            <div class="cloud-sync-panel">
+              <div class="cloud-sync-status">${esc(remoteStatus)}</div>
+              <div class="row cloud-sync-controls">
+                <input id="remoteEmail" type="email" placeholder="Supabase登录邮箱" autocomplete="username" />
+                <input id="remotePassword" type="password" placeholder="Supabase登录密码" autocomplete="current-password" />
+                <button type="button" class="primary-btn" id="remoteLoginBtn">${remoteAccessToken ? '重新登录云端' : '登录云端'}</button>
+                <button type="button" class="ghost-btn" id="remoteSyncBtn">立即同步</button>
+                ${remoteAccessToken ? '<button type="button" class="ghost-btn" id="remoteLogoutBtn">退出云端</button>' : ''}
+              </div>
+              <div class="note">${dataReady ? '导入同月数据会覆盖该月，其他历史月份会保留。登录云端后点击“立即同步”，其他访问者即可读取最新数据。' : '正在读取云端历史数据。读取成功前不能导入或修改，避免旧数据覆盖已保存的月份。'}</div>
             </div>
-            ${settingsBody()}
+            ${dataReady ? `
+              <div class="tabs" style="margin-bottom:12px;">
+                <button type="button" data-settings-tab="load" class="${state.settingsTab === 'load' ? 'active' : ''}">用户数据导入</button>
+                <button type="button" data-settings-tab="long" class="${state.settingsTab === 'long' ? 'active' : ''}">中长期数据</button>
+                <button type="button" data-settings-tab="agent" class="${state.settingsTab === 'agent' ? 'active' : ''}">国网代购价数据</button>
+                <button type="button" data-settings-tab="split" class="${state.settingsTab === 'split' ? 'active' : ''}">市场分摊</button>
+              </div>
+              ${settingsBody()}
+            ` : '<div class="note">请先等待云端读取完成；若读取失败，请登录拥有数据权限的 Supabase 账号后点击“立即同步”。</div>'}
           ` : `
             <div class="note">输入密码后可管理数据</div>
             <div class="row">
@@ -1627,6 +1857,39 @@
       if (pwd) pwd.addEventListener('keydown', (e) => { if (e.key === 'Enter') unlockSettings(); });
       return;
     }
+    const remoteLoginBtn = byId('remoteLoginBtn');
+    const remoteSyncBtn = byId('remoteSyncBtn');
+    const remoteLogoutBtn = byId('remoteLogoutBtn');
+    if (remoteLoginBtn) remoteLoginBtn.addEventListener('click', async () => {
+      remoteLoginBtn.disabled = true;
+      try {
+        await loginRemote();
+        await startRemoteSync();
+        alert('云端登录成功');
+      } catch (err) {
+        alert(err?.message || err);
+      } finally {
+        remoteLoginBtn.disabled = false;
+      }
+    });
+    if (remoteSyncBtn) remoteSyncBtn.addEventListener('click', async () => {
+      remoteSyncBtn.disabled = true;
+      try {
+        if (!remoteLoaded) await startRemoteSync();
+        await ensureRemoteDataReady();
+        if (!remoteAccessToken) {
+          alert('云端历史数据已读取。请登录云端后再保存修改。');
+        } else {
+          await saveRemoteData();
+          alert('数据已同步到云端');
+        }
+      } catch (err) {
+        alert(err?.message || err);
+      } finally {
+        remoteSyncBtn.disabled = false;
+      }
+    });
+    if (remoteLogoutBtn) remoteLogoutBtn.addEventListener('click', logoutRemote);
     document.querySelectorAll('[data-settings-tab]').forEach((btn) => {
       btn.type = 'button';
       btn.addEventListener('click', () => { state.settingsTab = btn.dataset.settingsTab; scheduleRender(); });
@@ -1667,12 +1930,12 @@
       }));
       document.querySelectorAll('[data-long-del]').forEach((btn) => btn.addEventListener('click', () => {
         state.data.longTermWeightedClearing.months.splice(Number(btn.dataset.longDel), 1);
-        invalidateDataCache(); persist(); scheduleRender();
+        invalidateDataCache(); persistData(); scheduleRender();
       }));
       const addBtn = byId('addLongBtn');
       if (addBtn) addBtn.addEventListener('click', () => {
         state.data.longTermWeightedClearing.months.push({ month: '2026-08', values: Array(24).fill(0) });
-        invalidateDataCache(); persist(); scheduleRender();
+        invalidateDataCache(); persistData(); scheduleRender();
       });
       const saveLongBtn = byId('saveLongBtn');
       if (saveLongBtn) saveLongBtn.addEventListener('click', saveLongSettings);
@@ -1984,10 +2247,17 @@
     scheduleRender();
   }
 
-  function handleImport(e) {
+  async function handleImport(e) {
     const input = e?.target?.files ? e.target : e;
     const files = [...(input?.files || [])];
     if (!files.length) return;
+    try {
+      await ensureRemoteDataReady();
+    } catch (err) {
+      if (input) input.value = '';
+      alert('导入已取消：' + (err?.message || err));
+      return;
+    }
     Promise.all(files.map((file) => file.arrayBuffer().then((buf) => parseLoadWorkbook(buf, file.name)).catch((err) => ({ error: err, file: file.name })))).then((results) => {
       const merged = [];
       const failures = [];
@@ -1996,7 +2266,7 @@
         else merged.push(...(result.records || []));
       }
       if (!merged.length) throw new Error(failures[0] || '没有识别到可用负荷数据');
-      const combined = combineLoadRecordsByUserDate(merged);
+      const combined = mergeLoadRecordsByUserDate(state.data.userLoad?.records || [], merged);
       state.data.userLoad = {
         headers: results.find((r) => r?.headers)?.headers || defaultLoadHeaders(),
         records: combined
@@ -2012,15 +2282,22 @@
     }).catch((err) => alert('导入失败：' + err.message));
   }
 
-  function handleImportLong(e) {
+  async function handleImportLong(e) {
     const input = e?.target?.files ? e.target : e;
     const file = input?.files && input.files[0];
     if (!file) return;
+    try {
+      await ensureRemoteDataReady();
+    } catch (err) {
+      if (input) input.value = '';
+      alert('导入已取消：' + (err?.message || err));
+      return;
+    }
     file.arrayBuffer().then((buf) => parseWorkbookRows(buf)).then((rows) => {
       const months = parseLongTermRows(rows);
       if (!months.length) throw new Error('没有识别到中长期月份数据');
       state.data.longTermWeightedClearing = state.data.longTermWeightedClearing || {};
-      state.data.longTermWeightedClearing.months = months;
+      state.data.longTermWeightedClearing.months = mergeMonthlyEntries(state.data.longTermWeightedClearing.months || [], months);
       invalidateDataCache();
       persistData();
       if (input) input.value = '';
@@ -2035,6 +2312,7 @@
     const currentMonth = inferMonthFromName(file.name) || state.ui.agentMonth || latestAgentMonth();
     let text = '';
     try {
+      await ensureRemoteDataReady();
       setImportFeedback('已选择图片文件', `${file.name}，正在准备识别...`, '');
       scheduleRender();
       text = await withTimeout(recognizeImageText(file, 'agent'), 45000, '代购价图片识别超时');
@@ -2070,6 +2348,7 @@
     const currentMonth = inferMonthFromName(file.name) || state.ui.agentMonth || latestAgentMonth();
     let text = '';
     try {
+      await ensureRemoteDataReady();
       setImportFeedback('已选择Excel文件', `${file.name}，正在准备识别...`, '');
       scheduleRender();
       const rows = await withTimeout(parseWorkbookRows(await file.arrayBuffer()), 15000, '代购价Excel解析超时');
@@ -2105,6 +2384,7 @@
     const currentMonth = inferMonthFromName(file.name) || state.ui.splitMonth || latestLongMonth();
     let text = '';
     try {
+      await ensureRemoteDataReady();
       setImportFeedback('已选择图片文件', `${file.name}，正在准备识别...`, '');
       scheduleRender();
       text = await withTimeout(recognizeImageText(file, 'split'), 45000, '市场分摊图片识别超时');
@@ -2141,6 +2421,7 @@
     const currentMonth = inferMonthFromName(file.name) || state.ui.splitMonth || latestLongMonth();
     let text = '';
     try {
+      await ensureRemoteDataReady();
       setImportFeedback('已选择Excel文件', `${file.name}，正在准备识别...`, '');
       scheduleRender();
       const rows = await withTimeout(parseWorkbookRows(await file.arrayBuffer()), 15000, '市场分摊Excel解析超时');
