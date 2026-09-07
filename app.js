@@ -204,6 +204,87 @@
     }
   }
 
+  async function syncRemoteData() {
+    const config = supabaseConfig();
+    if (!config) {
+      remoteReady = true;
+      remoteStatus = '未配置云端数据';
+      return;
+    }
+    remoteSyncing = true;
+    remoteStatus = '正在读取云端最新数据…';
+    scheduleRender();
+    try {
+      const rows = await supabaseFetch(`/rest/v1/${encodeURIComponent(config.table)}?id=eq.${encodeURIComponent(config.rowId)}&select=id,payload,updated_at`);
+      const row = Array.isArray(rows) ? rows[0] : null;
+      if (row?.payload && typeof row.payload === 'object') {
+        state.data = merge(state.data, row.payload);
+        ensureDataShape();
+        ensureSelections();
+        invalidateDataCache();
+        remoteStatus = `已同步云端数据${row.updated_at ? `（${formatRemoteTime(row.updated_at)}）` : ''}`;
+      } else {
+        remoteStatus = '云端还没有共享数据，当前使用内置数据';
+      }
+      remoteReady = true;
+    } catch (err) {
+      remoteReady = true;
+      remoteStatus = `云端读取失败：${err?.message || err}`;
+      console.warn(err);
+    }
+  }
+
+  function supabaseConfig() {
+    const config = window.SUPABASE_CONFIG || {};
+    if (!config.url || !config.publishableKey || !config.table || !config.rowId) return null;
+    return config;
+  }
+
+  function readRemoteAccessToken() {
+    try {
+      return sessionStorage.getItem('shanxi-supabase-access-token') || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function writeRemoteAccessToken(value) {
+    try {
+      if (value) sessionStorage.setItem('shanxi-supabase-access-token', value);
+      else sessionStorage.removeItem('shanxi-supabase-access-token');
+    } catch (_) {}
+  }
+
+  function remoteHeaders(withJson = false) {
+    const config = supabaseConfig();
+    const token = remoteAccessToken || config?.publishableKey || '';
+    return {
+      apikey: config?.publishableKey || '',
+      Authorization: `Bearer ${token}`,
+      ...(withJson ? { 'Content-Type': 'application/json' } : {})
+    };
+  }
+
+  async function supabaseFetch(path, options = {}) {
+    const config = supabaseConfig();
+    if (!config) throw new Error('未配置 Supabase');
+    const response = await fetch(`${config.url}${path}`, {
+      ...options,
+      headers: { ...remoteHeaders(Boolean(options.body)), ...(options.headers || {}) }
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(detail || `云端请求失败（${response.status}）`);
+    }
+    const text = await response.text();
+    if (!text.trim()) return null;
+    try {
+      return JSON.parse(text);
+    } catch (err) {
+      throw new Error(`云端返回了无法解析的数据：${err?.message || err}`);
+    }
+  }
+
   function startRemoteSync() {
     remoteLoadPromise = loadRemoteData();
     return remoteLoadPromise;
@@ -444,136 +525,81 @@
     } catch (err) {
       alert('导出失败：' + (err?.message || err));
     } finally {
-      btn.disabled = false;
-      btn.textContent = oldText;
+      remoteSyncing = false;
+      scheduleRender();
     }
   }
 
-  async function runSettingsExport() {
-    const btn = byId('exportDataBtn');
-    if (!btn || btn.disabled) return;
-    btn.disabled = true;
-    const oldText = btn.textContent;
-    btn.textContent = '正在导出...';
+  function queueRemoteSave() {
+    if (!remoteReady || remoteSyncing) return;
+    clearTimeout(remoteSaveTimer);
+    remoteSaveTimer = setTimeout(() => saveRemoteData().catch((err) => {
+      remoteStatus = `云端保存失败：${err?.message || err}`;
+      scheduleRender();
+    }), 800);
+  }
+
+  async function saveRemoteData() {
+    const config = supabaseConfig();
+    if (!config) return;
+    if (!remoteAccessToken) {
+      remoteStatus = '本地已保存；请在设置中登录云端后同步';
+      scheduleRender();
+      return;
+    }
+    remoteSyncing = true;
+    remoteStatus = '正在保存到云端…';
+    scheduleRender();
     try {
-      await exportData();
-    } catch (err) {
-      alert('导出失败：' + (err?.message || err));
+      await supabaseFetch(`/rest/v1/${encodeURIComponent(config.table)}?on_conflict=id`, {
+        method: 'POST',
+        headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify({
+          id: config.rowId,
+          payload: state.data,
+          updated_at: new Date().toISOString()
+        })
+      });
+      remoteStatus = `云端已更新（${formatRemoteTime(new Date().toISOString())}）`;
     } finally {
-      btn.disabled = false;
-      btn.textContent = oldText;
+      remoteSyncing = false;
+      scheduleRender();
     }
   }
 
-  function unlockSettings() {
-    const pwd = byId('settingsPwd');
-    if (!pwd) return;
-    if (pwd.value.trim() === '741852') {
-      state.settingsUnlocked = true;
-      render();
-    } else {
-      alert('密码不对');
+  function formatRemoteTime(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value || '');
+    return date.toLocaleString('zh-CN', { hour12: false });
+  }
+
+  async function loginRemote() {
+    const email = byId('remoteEmail')?.value.trim();
+    const password = byId('remotePassword')?.value || '';
+    if (!email || !password) {
+      alert('请输入云端账号和密码');
+      return;
     }
-  }
-
-  function ensureSelections() {
-    const months = state.data.longTermWeightedClearing?.months || [];
-    state.ui.longMonths = (state.ui.longMonths || []).filter((m) => months.some((x) => x.month === m));
-    if (!('longMonths' in state.ui) && months.length) state.ui.longMonths = [months[months.length - 1].month];
-    const agentMonths = state.data.agentPurchase?.months || [];
-    state.ui.agentMonths = (state.ui.agentMonths || []).filter((m) => agentMonths.some((x) => x.month === m));
-    if (!('agentMonths' in state.ui) && agentMonths.length) state.ui.agentMonths = [agentMonths[agentMonths.length - 1].month];
-    if (!state.ui.compareMonth && months.length) state.ui.compareMonth = months[months.length - 1].month;
-    if (!state.ui.splitMonth && months.length) state.ui.splitMonth = months[months.length - 1].month;
-    const splitOptions = splitVoltageLevelOptions();
-    const selectedSplit = findVoltageOptionStrict(splitOptions, state.ui.splitVoltageLevelId) || findVoltageOptionStrict(splitOptions, state.ui.voltageLevelId);
-    if (selectedSplit) state.ui.splitVoltageLevelId = selectedSplit.id;
-    if (!state.ui.splitVoltageLevelId && splitOptions.length) state.ui.splitVoltageLevelId = splitOptions[0].id;
-    const voltageOptions = voltageLevelOptions();
-    const selectedVoltage = findVoltageOptionStrict(voltageOptions, state.ui.voltageLevelId);
-    if (selectedVoltage) state.ui.voltageLevelId = selectedVoltage.id;
-    if (!state.ui.voltageLevelId && voltageOptions.length) state.ui.voltageLevelId = voltageOptions[0].id;
-    const loadRows = aggregateLoad(state.data.userLoad?.records || []);
-    const loadUsers = [...new Set(loadRows.map((r) => r.userName).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
-    if (state.ui.loadManageUser && !loadUsers.includes(state.ui.loadManageUser)) state.ui.loadManageUser = '';
-  }
-
-  function persistStartupMigration() {
-    const version = '20260826-voltage-levels-3';
-    if (state.ui.storageSchemaVersion === version) return;
-    state.ui.storageSchemaVersion = version;
-    persistDataNow();
-  }
-
-  function setImportFeedback(status = '', detail = '', preview = '') {
-    state.ui.importStatus = status;
-    state.ui.importDetail = detail;
-    state.ui.importPreview = preview;
-  }
-
-  function summarizeOcrPreview(text, limit = 20) {
-    const lines = String(text || '').split(/\n+/).map((s) => s.trim()).filter(Boolean);
-    if (!lines.length) return '';
-    return lines.slice(0, limit).join('\n');
-  }
-
-  function buildImportPreview({ fileName = '', kind = '', rawText = '', parsed = null, error = '' }) {
-    const parts = [];
-    if (fileName) parts.push(`文件：${fileName}`);
-    if (kind) parts.push(`类型：${kind}`);
-    if (error) parts.push(`结果：${error}`);
-    if (parsed) parts.push(describeParsedImport(parsed));
-    if (rawText) {
-      parts.push('原始识别：');
-      parts.push(summarizeOcrPreview(rawText, 40) || '（空）');
-    }
-    return parts.join('\n');
-  }
-
-  function describeParsedImport(parsed) {
-    if (!parsed || typeof parsed !== 'object') return '';
-    if (Object.prototype.hasOwnProperty.call(parsed, 'flatPriceKwh')) {
-      return [
-        `月份：${parsed.month || ''}`,
-        `平段价：${formatNumber(parsed.flatPriceKwh)}`,
-        `当月平均：${formatNumber(parsed.averagePurchaseKwh)}`,
-        `历史偏差：${formatNumber(parsed.historyDeviationKwh)}`,
-        `电压等级：${(parsed.voltageLevels || []).length} 条`,
-        ...(parsed.voltageLevels || []).map((v) => `${v.label || ''}｜线损 ${formatNumber(v.lineLossKwh)}｜输配 ${formatNumber(v.transmissionKwh)}｜基金 ${formatNumber(v.fundKwh)}｜系统 ${formatNumber(v.systemKwh)}`)
-      ].filter(Boolean).join('\n');
-    }
-    if (Object.prototype.hasOwnProperty.call(parsed, 'voltageLevels')) {
-      return [
-        `月份：${parsed.month || ''}`,
-        `电压等级：${(parsed.voltageLevels || []).length} 条`,
-        ...(parsed.voltageLevels || []).map((v) => `${v.label || ''}｜线损 ${formatNumber(v.lineLossKwh)}｜输配 ${formatNumber(v.transmissionKwh)}｜基金 ${formatNumber(v.fundKwh)}｜系统 ${formatNumber(v.systemKwh)}`)
-      ].filter(Boolean).join('\n');
-    }
-    return JSON.stringify(parsed, null, 2);
-  }
-
-  function withTimeout(promise, ms, label) {
-    let timer = null;
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(label || `超时 ${ms}ms`)), ms);
+    const config = supabaseConfig();
+    if (!config) return;
+    const response = await fetch(`${config.url}/auth/v1/token?grant_type=password`, {
+      method: 'POST',
+      headers: { apikey: config.publishableKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
     });
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+    const result = await response.json();
+    if (!response.ok || !result.access_token) throw new Error(result.error_description || result.msg || '云端登录失败');
+    remoteAccessToken = result.access_token;
+    writeRemoteAccessToken(remoteAccessToken);
+    remoteStatus = `云端已登录：${email}`;
+    scheduleRender();
   }
 
-  function ensureDataShape() {
-    const agent = state.data.agentPurchase || {};
-    if (!agent.months) agent.months = [{ month: agent.month || '2026-07', flatPriceKwh: agent.flatPriceKwh || 0, averagePurchaseKwh: agent.averagePurchaseKwh || 0, historyDeviationKwh: agent.historyDeviationKwh || 0 }];
-    if (!agent.voltageLevels && state.data.marketSplit?.voltageLevels) agent.voltageLevels = clone(state.data.marketSplit.voltageLevels);
-    (agent.months || []).forEach((item) => normalizeAgentMonthData(item));
-    state.data.agentPurchase = agent;
-    const split = state.data.marketSplit || {};
-    if (Array.isArray(split.voltageLevels)) split.voltageLevels = normalizeSplitVoltageLevels(split.voltageLevels);
-    if (!split.months) split.months = [{ month: split.month || agent.month || '2026-07', voltageLevels: clone(split.voltageLevels || agent.voltageLevels || []) }];
-    split.months = (split.months || []).map((item) => ({
-      ...item,
-      voltageLevels: normalizeSplitVoltageLevels(item?.voltageLevels || split.voltageLevels || agent.voltageLevels || [])
-    }));
-    state.data.marketSplit = split;
+  function logoutRemote() {
+    remoteAccessToken = '';
+    writeRemoteAccessToken('');
+    remoteStatus = '已退出云端登录';
+    scheduleRender();
   }
 
   function byId(id) { return document.getElementById(id); }
@@ -1883,6 +1909,22 @@
           await saveRemoteData();
           alert('数据已同步到云端');
         }
+      } catch (err) {
+        alert(err?.message || err);
+      } finally {
+        remoteSyncBtn.disabled = false;
+      }
+    });
+    if (remoteLogoutBtn) remoteLogoutBtn.addEventListener('click', logoutRemote);
+    document.querySelectorAll('[data-settings-tab]').forEach((btn) => {
+      btn.type = 'button';
+      btn.addEventListener('click', () => { state.settingsTab = btn.dataset.settingsTab; scheduleRender(); });
+    });
+    if (remoteSyncBtn) remoteSyncBtn.addEventListener('click', async () => {
+      remoteSyncBtn.disabled = true;
+      try {
+        await saveRemoteData();
+        alert(remoteAccessToken ? '数据已同步到云端' : '请先登录云端');
       } catch (err) {
         alert(err?.message || err);
       } finally {
