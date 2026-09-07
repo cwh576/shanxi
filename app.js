@@ -403,6 +403,17 @@
     scheduleRender();
   }
 
+  function unlockSettings() {
+    const pwd = byId('settingsPwd');
+    if (!pwd) return;
+    if (pwd.value.trim() === '741852') {
+      state.settingsUnlocked = true;
+      render();
+    } else {
+      alert('密码不对');
+    }
+  }
+
   function logoutRemote() {
     remoteAccessToken = '';
     writeRemoteAccessToken('');
