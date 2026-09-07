@@ -1977,9 +1977,7 @@
 
   function bindSettings() {
     if (!state.settingsUnlocked) {
-      const unlockBtn = byId('unlockSettingsBtn');
       const pwd = byId('settingsPwd');
-      if (unlockBtn) unlockBtn.addEventListener('click', unlockSettings);
       if (pwd) pwd.addEventListener('keydown', (e) => { if (e.key === 'Enter') unlockSettings(); });
       return;
     }
