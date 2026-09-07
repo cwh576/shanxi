@@ -602,6 +602,106 @@
     scheduleRender();
   }
 
+  function ensureSelections() {
+    const months = state.data.longTermWeightedClearing?.months || [];
+    state.ui.longMonths = (state.ui.longMonths || []).filter((m) => months.some((x) => x.month === m));
+    if (!('longMonths' in state.ui) && months.length) state.ui.longMonths = [months[months.length - 1].month];
+    const agentMonths = state.data.agentPurchase?.months || [];
+    state.ui.agentMonths = (state.ui.agentMonths || []).filter((m) => agentMonths.some((x) => x.month === m));
+    if (!('agentMonths' in state.ui) && agentMonths.length) state.ui.agentMonths = [agentMonths[agentMonths.length - 1].month];
+    if (!state.ui.compareMonth && months.length) state.ui.compareMonth = months[months.length - 1].month;
+    if (!state.ui.splitMonth && months.length) state.ui.splitMonth = months[months.length - 1].month;
+    const splitOptions = splitVoltageLevelOptions();
+    const selectedSplit = findVoltageOptionStrict(splitOptions, state.ui.splitVoltageLevelId) || findVoltageOptionStrict(splitOptions, state.ui.voltageLevelId);
+    if (selectedSplit) state.ui.splitVoltageLevelId = selectedSplit.id;
+    if (!state.ui.splitVoltageLevelId && splitOptions.length) state.ui.splitVoltageLevelId = splitOptions[0].id;
+    const voltageOptions = voltageLevelOptions();
+    const selectedVoltage = findVoltageOptionStrict(voltageOptions, state.ui.voltageLevelId);
+    if (selectedVoltage) state.ui.voltageLevelId = selectedVoltage.id;
+    if (!state.ui.voltageLevelId && voltageOptions.length) state.ui.voltageLevelId = voltageOptions[0].id;
+    const loadRows = aggregateLoad(state.data.userLoad?.records || []);
+    const loadUsers = [...new Set(loadRows.map((r) => r.userName).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+    if (state.ui.loadManageUser && !loadUsers.includes(state.ui.loadManageUser)) state.ui.loadManageUser = '';
+  }
+
+  function persistStartupMigration() {
+    const version = '20260826-voltage-levels-3';
+    if (state.ui.storageSchemaVersion === version) return;
+    state.ui.storageSchemaVersion = version;
+    persistDataNow();
+  }
+
+  function setImportFeedback(status = '', detail = '', preview = '') {
+    state.ui.importStatus = status;
+    state.ui.importDetail = detail;
+    state.ui.importPreview = preview;
+  }
+
+  function summarizeOcrPreview(text, limit = 20) {
+    const lines = String(text || '').split(/\n+/).map((s) => s.trim()).filter(Boolean);
+    if (!lines.length) return '';
+    return lines.slice(0, limit).join('\n');
+  }
+
+  function buildImportPreview({ fileName = '', kind = '', rawText = '', parsed = null, error = '' }) {
+    const parts = [];
+    if (fileName) parts.push(`文件：${fileName}`);
+    if (kind) parts.push(`类型：${kind}`);
+    if (error) parts.push(`结果：${error}`);
+    if (parsed) parts.push(describeParsedImport(parsed));
+    if (rawText) {
+      parts.push('原始识别：');
+      parts.push(summarizeOcrPreview(rawText, 40) || '（空）');
+    }
+    return parts.join('\n');
+  }
+
+  function describeParsedImport(parsed) {
+    if (!parsed || typeof parsed !== 'object') return '';
+    if (Object.prototype.hasOwnProperty.call(parsed, 'flatPriceKwh')) {
+      return [
+        `月份：${parsed.month || ''}`,
+        `平段价：${formatNumber(parsed.flatPriceKwh)}`,
+        `当月平均：${formatNumber(parsed.averagePurchaseKwh)}`,
+        `历史偏差：${formatNumber(parsed.historyDeviationKwh)}`,
+        `电压等级：${(parsed.voltageLevels || []).length} 条`,
+        ...(parsed.voltageLevels || []).map((v) => `${v.label || ''}｜线损 ${formatNumber(v.lineLossKwh)}｜输配 ${formatNumber(v.transmissionKwh)}｜基金 ${formatNumber(v.fundKwh)}｜系统 ${formatNumber(v.systemKwh)}`)
+      ].filter(Boolean).join('\n');
+    }
+    if (Object.prototype.hasOwnProperty.call(parsed, 'voltageLevels')) {
+      return [
+        `月份：${parsed.month || ''}`,
+        `电压等级：${(parsed.voltageLevels || []).length} 条`,
+        ...(parsed.voltageLevels || []).map((v) => `${v.label || ''}｜线损 ${formatNumber(v.lineLossKwh)}｜输配 ${formatNumber(v.transmissionKwh)}｜基金 ${formatNumber(v.fundKwh)}｜系统 ${formatNumber(v.systemKwh)}`)
+      ].filter(Boolean).join('\n');
+    }
+    return JSON.stringify(parsed, null, 2);
+  }
+
+  function withTimeout(promise, ms, label) {
+    let timer = null;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(label || `超时 ${ms}ms`)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  function ensureDataShape() {
+    const agent = state.data.agentPurchase || {};
+    if (!agent.months) agent.months = [{ month: agent.month || '2026-07', flatPriceKwh: agent.flatPriceKwh || 0, averagePurchaseKwh: agent.averagePurchaseKwh || 0, historyDeviationKwh: agent.historyDeviationKwh || 0 }];
+    if (!agent.voltageLevels && state.data.marketSplit?.voltageLevels) agent.voltageLevels = clone(state.data.marketSplit.voltageLevels);
+    (agent.months || []).forEach((item) => normalizeAgentMonthData(item));
+    state.data.agentPurchase = agent;
+    const split = state.data.marketSplit || {};
+    if (Array.isArray(split.voltageLevels)) split.voltageLevels = normalizeSplitVoltageLevels(split.voltageLevels);
+    if (!split.months) split.months = [{ month: split.month || agent.month || '2026-07', voltageLevels: clone(split.voltageLevels || agent.voltageLevels || []) }];
+    split.months = (split.months || []).map((item) => ({
+      ...item,
+      voltageLevels: normalizeSplitVoltageLevels(item?.voltageLevels || split.voltageLevels || agent.voltageLevels || [])
+    }));
+    state.data.marketSplit = split;
+  }
+
   function byId(id) { return document.getElementById(id); }
   function esc(v) { return String(v ?? '').replace(/[&<>]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m])); }
   function fmt(v, d = 3) { return v === null || v === undefined || Number.isNaN(v) ? '—' : Number(v).toFixed(d); }
