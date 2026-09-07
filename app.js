@@ -2029,24 +2029,10 @@
       btn.type = 'button';
       btn.addEventListener('click', () => { state.settingsTab = btn.dataset.settingsTab; scheduleRender(); });
     });
-    if (remoteSyncBtn) remoteSyncBtn.addEventListener('click', async () => {
-      remoteSyncBtn.disabled = true;
-      try {
-        await saveRemoteData();
-        alert(remoteAccessToken ? '数据已同步到云端' : '请先登录云端');
-      } catch (err) {
-        alert(err?.message || err);
-      } finally {
-        remoteSyncBtn.disabled = false;
-      }
-    });
-    if (remoteLogoutBtn) remoteLogoutBtn.addEventListener('click', logoutRemote);
-    document.querySelectorAll('[data-settings-tab]').forEach((btn) => {
-      btn.type = 'button';
-      btn.addEventListener('click', () => { state.settingsTab = btn.dataset.settingsTab; scheduleRender(); });
-    });
+    if (supabaseConfig() && !remoteLoaded) return;
     if (state.settingsTab === 'load') {
-      byId('importLoadFile').addEventListener('change', handleImport);
+      const importLoad = byId('importLoadFile');
+      if (importLoad) importLoad.addEventListener('change', handleImport);
       const saveLoadBtn = byId('saveLoadSettingsBtn');
       if (saveLoadBtn) saveLoadBtn.addEventListener('click', saveAllManagedLoadRows);
       byId('resetDataBtn').addEventListener('click', () => { if (confirm('恢复默认数据？')) { clearTimeout(persistTimer); localStorage.removeItem(STORAGE_KEY); location.reload(); } });
