@@ -39,7 +39,10 @@
       compareSplit: false,
       compareK: 0,
       compareLoadMode: '24',
-      compareRows: []
+      compareRows: [],
+      quantRows: [],
+      quantUser: '',
+      quantMonth: ''
     },
     data: clone(defaults),
     settingsOpen: false,
@@ -70,6 +73,9 @@
   let remoteAccessToken = readRemoteAccessToken();
   const TABLE_PREVIEW_LIMIT = 1000;
   const CHART_SERIES_LIMIT = 80;
+  const QUANT_LOWER_LIMIT = 0.826;
+  const QUANT_LOWER_LINE = 0.8261;
+  const QUANT_UPPER_LIMIT = 1.125;
 
   hydrate();
   ensureDataShape();
@@ -96,7 +102,7 @@
       const rawUi = localStorage.getItem(UI_STORAGE_KEY);
       if (rawData) state.data = merge(state.data, JSON.parse(rawData));
       if (rawUi) state.ui = { ...state.ui, ...JSON.parse(rawUi) };
-      if (['longTerm', 'agent', 'split', 'load', 'compare'].includes(state.ui.activeTab)) state.tab = state.ui.activeTab;
+      if (['longTerm', 'agent', 'split', 'load', 'compare', 'quant'].includes(state.ui.activeTab)) state.tab = state.ui.activeTab;
     } catch (_) {}
   }
 
@@ -1137,7 +1143,8 @@
       ['agent', '国网代购价'],
       ['split', '市场分摊'],
       ['load', '用户负荷数据'],
-      ['compare', '价格对比']
+      ['compare', '价格对比'],
+      ['quant', '用户量化']
     ];
     app.innerHTML = `
       <div class="shell">
@@ -1156,7 +1163,7 @@
               <h2>${pageTitle()}</h2>
             </div>
             <div class="actions">
-              <span class="pill">${state.tab === 'load' ? '电量单位：MWH' : '价格单位：元/MWh'}</span>
+              <span class="pill">${state.tab === 'load' ? '电量单位：MWH' : state.tab === 'quant' ? '偏差单位：%' : '价格单位：元/MWh'}</span>
               <button class="icon-btn" id="settingsBtn" title="设置">⚙</button>
             </div>
           </div>
@@ -1181,7 +1188,8 @@
       agent: '国网代购价',
       split: '市场分摊',
       load: '用户负荷数据',
-      compare: '价格对比'
+      compare: '价格对比',
+      quant: '用户量化'
     }[state.tab];
   }
 
@@ -1190,6 +1198,7 @@
     if (state.tab === 'agent') return renderAgent();
     if (state.tab === 'split') return renderSplit();
     if (state.tab === 'compare') return renderCompare();
+    if (state.tab === 'quant') return renderQuant();
     return renderLoad();
   }
 
@@ -1466,6 +1475,171 @@
         </div>
       </div>
     `;
+  }
+
+  function renderQuant() {
+    const groups = quantAnalysisGroups();
+    const selection = ensureQuantSelection(groups);
+    const selected = selection.group;
+    const users = [...new Set(groups.map((g) => g.userName).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+    const months = groups
+      .filter((g) => !selection.user || g.userName === selection.user)
+      .map((g) => g.month)
+      .filter(Boolean)
+      .sort();
+    const summaryRows = groups.slice(0, TABLE_PREVIEW_LIMIT);
+    const detailRows = selected?.details || [];
+    const scatterCount = selected?.points?.length || 0;
+    const score = selected ? formatNumber(selected.score) : '--';
+    const qualified = selected ? `${selected.qualified}/${selected.total}` : '--';
+    return `
+      <div class="section controls-section">
+        <div class="toolbar">
+          <label class="primary-btn import-btn">导入Excel数据<input id="quantLoadFile" type="file" accept=".xlsx,.xls" multiple class="hidden" /></label>
+          <button class="ghost-btn" data-clear-quant-load>清除量化表</button>
+          <button class="ghost-btn" data-export="quant">导出结果</button>
+          <div class="group"><label>用户</label><select id="quantUser">${users.length ? users.map((u) => `<option value="${esc(u)}" ${u === selection.user ? 'selected' : ''}>${esc(u)}</option>`).join('') : '<option value="">暂无数据</option>'}</select></div>
+          <div class="group"><label>月份</label><select id="quantMonth">${months.length ? months.map((m) => `<option value="${esc(m)}" ${m === selection.month ? 'selected' : ''}>${esc(m)}</option>`).join('') : '<option value="">暂无数据</option>'}</select></div>
+        </div>
+      </div>
+      <div class="grid-3">
+        <div class="kpi"><div class="label">量化得分</div><div class="value">${score}</div><div class="sub">满分 100</div></div>
+        <div class="kpi"><div class="label">合格时段</div><div class="value">${qualified}</div><div class="sub">82.6% 至 112.5%</div></div>
+        <div class="kpi"><div class="label">统计天数</div><div class="value">${selected?.days || 0}</div><div class="sub">散点 ${scatterCount} 个</div></div>
+      </div>
+      <div class="section">
+        <div class="chart-wrap">
+          <div class="chart-head"><div><b>偏差散点图</b></div><div class="hint">${selected ? `${esc(selected.userName)} ${esc(selected.month)}` : ''}</div></div>
+          <canvas id="quantScatterChart"></canvas>
+        </div>
+      </div>
+      <div class="section">
+        <h3>用户月份评分</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>用户</th><th>月份</th><th>天数</th><th>合格时段</th><th>总时段</th><th>量化得分</th></tr></thead>
+            <tbody>
+              ${summaryRows.map((g) => `<tr><td>${esc(g.userName)}</td><td>${esc(g.month)}</td><td>${g.days}</td><td>${g.qualified}</td><td>${g.total}</td><td>${formatNumber(g.score)}</td></tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="section">
+        <h3>每日时段偏差</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>日期</th><th>类型</th><th>合格时段</th><th>日得分</th>${Array.from({ length: 24 }, (_, i) => `<th>${i}</th>`).join('')}</tr>
+            </thead>
+            <tbody>
+              ${detailRows.map((r) => `<tr><td>${r.date}</td><td>${r.typeLabel}</td><td>${r.qualified}/${r.total}</td><td>${formatNumber(r.score)}</td>${r.ratios.map((v) => `<td>${formatPercentCell(v)}</td>`).join('')}</tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  function quantAnalysisGroups() {
+    const source = aggregateLoad(state.ui.quantRows || []);
+    const grouped = new Map();
+    for (const row of source) {
+      const date = parseDateMaybe(row.date || '');
+      const month = normalizeMonthValue(date.slice(0, 7));
+      const userName = normalizeCellText(row.userName || '');
+      if (!userName || !month || !/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+      const key = `${userName}__${month}`;
+      if (!grouped.has(key)) grouped.set(key, { userName, month, rows: [] });
+      grouped.get(key).rows.push({
+        date,
+        dayType: quantDayType(date),
+        values: resampleSeriesExact(row.points || [], 24).map((v) => Number(v || 0))
+      });
+    }
+    return [...grouped.values()].map(buildQuantGroup).sort((a, b) => {
+      const userCompare = a.userName.localeCompare(b.userName, 'zh-Hans-CN');
+      if (userCompare) return userCompare;
+      return a.month.localeCompare(b.month);
+    });
+  }
+
+  function buildQuantGroup(group) {
+    const baselines = {};
+    ['weekday', 'saturday', 'sunday'].forEach((type) => {
+      baselines[type] = Array.from({ length: 24 }, (_, hour) => {
+        const values = group.rows.filter((r) => r.dayType === type).map((r) => r.values[hour]).filter(isFiniteDataValue).map(Number);
+        return values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
+      });
+    });
+    const details = group.rows.slice().sort((a, b) => a.date.localeCompare(b.date)).map((row) => {
+      const base = baselines[row.dayType] || [];
+      const ratios = row.values.map((value, hour) => {
+        const benchmark = Number(base[hour]);
+        return benchmark > 0 && isFiniteDataValue(value) ? Number(value) / benchmark : null;
+      });
+      const total = ratios.filter(isFiniteDataValue).length;
+      const qualified = ratios.filter(isQualifiedDeviation).length;
+      return {
+        date: row.date,
+        type: row.dayType,
+        typeLabel: quantDayTypeLabel(row.dayType),
+        ratios,
+        total,
+        qualified,
+        score: total ? round((qualified / total) * 100, 3) : 0
+      };
+    });
+    const points = details.flatMap((row) => row.ratios.map((ratio, hour) => ({ date: row.date, type: row.type, hour, ratio })).filter((p) => isFiniteDataValue(p.ratio)));
+    const total = details.reduce((sum, row) => sum + row.total, 0);
+    const qualified = details.reduce((sum, row) => sum + row.qualified, 0);
+    return {
+      userName: group.userName,
+      month: group.month,
+      days: details.length,
+      baselines,
+      details,
+      points,
+      total,
+      qualified,
+      score: total ? round((qualified / total) * 100, 3) : 0
+    };
+  }
+
+  function ensureQuantSelection(groups) {
+    if (!groups.length) {
+      state.ui.quantUser = '';
+      state.ui.quantMonth = '';
+      return { user: '', month: '', group: null };
+    }
+    let user = state.ui.quantUser || groups[0].userName;
+    if (!groups.some((g) => g.userName === user)) user = groups[0].userName;
+    let months = groups.filter((g) => g.userName === user).map((g) => g.month).sort();
+    let month = state.ui.quantMonth || months[0] || '';
+    if (!months.includes(month)) month = months[0] || '';
+    state.ui.quantUser = user;
+    state.ui.quantMonth = month;
+    return { user, month, group: groups.find((g) => g.userName === user && g.month === month) || null };
+  }
+
+  function quantDayType(date) {
+    const match = String(date || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return 'weekday';
+    const day = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).getDay();
+    if (day === 0) return 'sunday';
+    if (day === 6) return 'saturday';
+    return 'weekday';
+  }
+
+  function quantDayTypeLabel(type) {
+    return type === 'saturday' ? '周六' : type === 'sunday' ? '周日' : '周一至周五';
+  }
+
+  function isQualifiedDeviation(v) {
+    return isFiniteDataValue(v) && Number(v) >= QUANT_LOWER_LIMIT && Number(v) <= QUANT_UPPER_LIMIT;
+  }
+
+  function formatPercentCell(v) {
+    return isFiniteDataValue(v) ? `${round(Number(v) * 100, 2).toFixed(2)}%` : '/';
   }
 
   function compareRowsForMonthlyLoad(rows, voltageId = selectedVoltageId()) {
@@ -1960,6 +2134,24 @@
         persist();
         scheduleRender();
       });
+    }
+    if (state.tab === 'quant') {
+      const quantFile = byId('quantLoadFile');
+      const quantUser = byId('quantUser');
+      const quantMonth = byId('quantMonth');
+      if (quantFile) quantFile.addEventListener('change', handleQuantImport);
+      if (quantUser) quantUser.addEventListener('change', (e) => { state.ui.quantUser = e.target.value; state.ui.quantMonth = ''; persist(); scheduleRender(); });
+      if (quantMonth) quantMonth.addEventListener('change', (e) => { state.ui.quantMonth = e.target.value; persist(); scheduleRender(); });
+      const clearQuantLoad = document.querySelector('[data-clear-quant-load]');
+      if (clearQuantLoad) clearQuantLoad.addEventListener('click', () => {
+        state.ui.quantRows = [];
+        state.ui.quantUser = '';
+        state.ui.quantMonth = '';
+        persist();
+        scheduleRender();
+      });
+      const selected = ensureQuantSelection(quantAnalysisGroups()).group;
+      drawDeviationScatterChart('quantScatterChart', selected?.points || []);
     }
     const voltageSelectGlobal = byId('voltageLevel');
     if (voltageSelectGlobal) voltageSelectGlobal.addEventListener('change', (e) => { state.ui.voltageLevelId = e.target.value; persist(); scheduleRender(); });
@@ -4607,6 +4799,96 @@
     return loadPointLabels96();
   }
 
+  function drawDeviationScatterChart(id, points) {
+    const canvas = byId(id);
+    if (!canvas) return;
+    const parent = canvas.parentElement;
+    const w = Math.max(320, parent.clientWidth - 24);
+    const h = 382;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, w, h);
+    const pad = { l: 62, r: 24, t: 24, b: 58 };
+    const plotW = w - pad.l - pad.r;
+    const plotH = h - pad.t - pad.b;
+    const values = (points || []).map((p) => Number(p.ratio)).filter(isFiniteDataValue);
+    const minRaw = values.length ? Math.min(...values, QUANT_LOWER_LINE) : 0.75;
+    const maxRaw = values.length ? Math.max(...values, QUANT_UPPER_LIMIT) : 1.2;
+    const yMin = Math.max(0, Math.floor((minRaw - 0.04) * 10) / 10);
+    const yMax = Math.ceil((maxRaw + 0.04) * 10) / 10 || 1.3;
+    const ySpan = yMax - yMin || 1;
+    const xForHour = (hour) => pad.l + (plotW * Number(hour || 0)) / 23;
+    const yForRatio = (ratio) => pad.t + plotH - ((Number(ratio) - yMin) / ySpan) * plotH;
+    ctx.strokeStyle = '#e6efed';
+    ctx.fillStyle = '#49615d';
+    ctx.font = '12px system-ui';
+    for (let i = 0; i <= 5; i++) {
+      const ratio = yMin + (ySpan * i) / 5;
+      const y = yForRatio(ratio);
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+      ctx.fillText(`${Math.round(ratio * 100)}%`, 10, y + 4);
+    }
+    for (let hour = 0; hour < 24; hour++) {
+      const x = xForHour(hour);
+      if (hour % 2 === 0) ctx.fillText(String(hour), x - 4, h - 24);
+    }
+    ctx.strokeStyle = '#93a9a5';
+    ctx.beginPath(); ctx.moveTo(pad.l, pad.t); ctx.lineTo(pad.l, pad.t + plotH); ctx.lineTo(w - pad.r, pad.t + plotH); ctx.stroke();
+    drawDeviationThreshold(ctx, pad, plotW, yForRatio(QUANT_LOWER_LINE), '#16a34a', '82.61%');
+    drawDeviationThreshold(ctx, pad, plotW, yForRatio(QUANT_UPPER_LIMIT), '#dc2626', '112.5%');
+    const colors = { weekday: '#0f766e', saturday: '#ca8a04', sunday: '#2563eb' };
+    (points || []).forEach((point, idx) => {
+      if (!isFiniteDataValue(point.ratio)) return;
+      const jitter = ((idx % 7) - 3) * 1.2;
+      const x = Math.max(pad.l, Math.min(w - pad.r, xForHour(point.hour) + jitter));
+      const y = yForRatio(point.ratio);
+      ctx.globalAlpha = isQualifiedDeviation(point.ratio) ? 0.76 : 0.88;
+      ctx.fillStyle = isQualifiedDeviation(point.ratio) ? (colors[point.type] || '#0f766e') : '#ef4444';
+      ctx.beginPath();
+      ctx.arc(x, y, 3, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+    drawSmallLegend(ctx, [
+      ['周一至周五', colors.weekday],
+      ['周六', colors.saturday],
+      ['周日', colors.sunday],
+      ['超出范围', '#ef4444']
+    ], pad.l, h - 8);
+  }
+
+  function drawDeviationThreshold(ctx, pad, plotW, y, color, label) {
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.setLineDash([6, 5]);
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(pad.l, y);
+    ctx.lineTo(pad.l + plotW, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ctx.fillText(label, pad.l + plotW - 46, y - 6);
+    ctx.restore();
+  }
+
+  function drawSmallLegend(ctx, items, startX, y) {
+    let x = startX;
+    ctx.font = '12px system-ui';
+    items.forEach(([label, color]) => {
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y - 10, 10, 10);
+      ctx.fillStyle = '#47615d';
+      ctx.fillText(label, x + 15, y);
+      x += 86;
+    });
+  }
+
   function drawLineChart(id, series, unit = '', xLabels = null, opts = {}) {
     const canvas = byId(id);
     if (!canvas) return;
@@ -4946,6 +5228,18 @@
       const temp = compareRowsForMonthlyLoad(state.ui.compareRows || []);
       rows = [['用户', '月份', ...Array.from({ length: 24 }, (_, i) => String(i)), '售电公司加权均价', '国网代购加权均价'], ...temp.map((r) => [r.userName, r.month, ...r.values, r.longAvg, r.agentAvg])];
       name = '用户测算结果.xlsx';
+    } else if (kind === 'quant') {
+      const groups = quantAnalysisGroups();
+      rows = [
+        ['用户月份评分'],
+        ['用户', '月份', '天数', '合格时段', '总时段', '量化得分'],
+        ...groups.map((g) => [g.userName, g.month, g.days, g.qualified, g.total, g.score]),
+        [],
+        ['每日时段偏差'],
+        ['用户', '月份', '日期', '类型', '合格时段', '总时段', '日得分', ...Array.from({ length: 24 }, (_, i) => String(i))],
+        ...groups.flatMap((g) => g.details.map((r) => [g.userName, g.month, r.date, r.typeLabel, r.qualified, r.total, r.score, ...r.ratios.map((v) => isFiniteDataValue(v) ? round(Number(v) * 100, 2) : '')]))
+      ];
+      name = '用户量化结果.xlsx';
     }
     if (!rows.length) {
       alert('当前没有可导出的表格数据');
@@ -4966,6 +5260,30 @@
       }
       if (!merged.length) throw new Error(failures[0] || '没有识别到可用负荷数据');
       state.ui.compareRows = sortLoadRecordsByUserDate(aggregateLoad(merged));
+      persist();
+      e.target.value = '';
+      if (failures.length) alert(`部分文件导入失败：\n${failures.join('\n')}`);
+      scheduleRender();
+    }).catch((err) => alert('导入失败：' + err.message));
+  }
+
+  function handleQuantImport(e) {
+    const files = [...(e.target.files || [])];
+    if (!files.length) return;
+    Promise.all(files.map((file) => file.arrayBuffer().then((buf) => parseLoadWorkbook(buf, file.name)).catch((err) => ({ error: err, file: file.name })))).then((results) => {
+      const merged = [];
+      const failures = [];
+      for (const result of results) {
+        if (result?.error) failures.push(`${result.file}：${result.error?.message || result.error}`);
+        else merged.push(...(result.records || []));
+      }
+      if (!merged.length) throw new Error(failures[0] || '没有识别到可用负荷数据');
+      state.ui.quantRows = mergeLoadRecordsByUserDate(state.ui.quantRows || [], merged);
+      const firstGroup = quantAnalysisGroups()[0];
+      if (firstGroup) {
+        state.ui.quantUser = firstGroup.userName;
+        state.ui.quantMonth = firstGroup.month;
+      }
       persist();
       e.target.value = '';
       if (failures.length) alert(`部分文件导入失败：\n${failures.join('\n')}`);
