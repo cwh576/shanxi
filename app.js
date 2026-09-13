@@ -76,6 +76,7 @@
   const QUANT_LOWER_LIMIT = 0.826;
   const QUANT_LOWER_LINE = 0.8261;
   const QUANT_UPPER_LIMIT = 1.125;
+  const QUANT_ALL_MONTH_VALUE = '__all__';
 
   hydrate();
   ensureDataShape();
@@ -1487,7 +1488,8 @@
       .map((g) => g.month)
       .filter(Boolean)
       .sort();
-    const summaryRows = groups.slice(0, TABLE_PREVIEW_LIMIT);
+    const monthOptions = months.length ? [QUANT_ALL_MONTH_VALUE, ...months] : [];
+    const summaryRows = quantSummaryRowsWithTotals(groups).slice(0, TABLE_PREVIEW_LIMIT);
     const detailRows = selected?.details || [];
     const scatterCount = selected?.points?.length || 0;
     const score = selected ? formatNumber(selected.score) : '--';
@@ -1499,7 +1501,7 @@
           <button class="ghost-btn" data-clear-quant-load>清除量化表</button>
           <button class="ghost-btn" data-export="quant">导出结果</button>
           <div class="group"><label>用户</label><select id="quantUser">${users.length ? users.map((u) => `<option value="${esc(u)}" ${u === selection.user ? 'selected' : ''}>${esc(u)}</option>`).join('') : '<option value="">暂无数据</option>'}</select></div>
-          <div class="group"><label>月份</label><select id="quantMonth">${months.length ? months.map((m) => `<option value="${esc(m)}" ${m === selection.month ? 'selected' : ''}>${esc(m)}</option>`).join('') : '<option value="">暂无数据</option>'}</select></div>
+          <div class="group"><label>月份</label><select id="quantMonth">${monthOptions.length ? monthOptions.map((m) => `<option value="${esc(m)}" ${m === selection.month ? 'selected' : ''}>${m === QUANT_ALL_MONTH_VALUE ? '加总' : esc(m)}</option>`).join('') : '<option value="">暂无数据</option>'}</select></div>
         </div>
       </div>
       <div class="grid-3">
@@ -1509,7 +1511,7 @@
       </div>
       <div class="section">
         <div class="chart-wrap">
-          <div class="chart-head"><div><b>偏差散点图</b></div><div class="hint">${selected ? `${esc(selected.userName)} ${esc(selected.month)}` : ''}</div></div>
+          <div class="chart-head"><div><b>偏差散点图</b></div><div class="hint">${selected ? `${esc(selected.userName)} ${selected.month === QUANT_ALL_MONTH_VALUE ? '加总' : esc(selected.month)}` : ''}</div></div>
           <canvas id="quantScatterChart"></canvas>
         </div>
       </div>
@@ -1517,9 +1519,9 @@
         <h3>用户月份评分</h3>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>用户</th><th>月份</th><th>天数</th><th>合格时段</th><th>总时段</th><th>量化得分</th></tr></thead>
+            <thead><tr><th>用户</th><th>月份</th><th>月总用电量(MWh)</th><th>天数</th><th>合格时段</th><th>总时段</th><th>量化得分</th></tr></thead>
             <tbody>
-              ${summaryRows.map((g) => `<tr><td>${esc(g.userName)}</td><td>${esc(g.month)}</td><td>${g.days}</td><td>${g.qualified}</td><td>${g.total}</td><td>${formatNumber(g.score)}</td></tr>`).join('')}
+              ${summaryRows.map((g) => `<tr><td>${esc(g.userName)}</td><td>${g.month === QUANT_ALL_MONTH_VALUE ? '加总' : esc(g.month)}</td><td>${formatNumber(g.energyTotal)}</td><td>${g.days}</td><td>${g.qualified}</td><td>${g.total}</td><td>${formatNumber(g.score)}</td></tr>`).join('')}
             </tbody>
           </table>
         </div>
@@ -1529,10 +1531,10 @@
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>日期</th><th>类型</th><th>合格时段</th><th>日得分</th>${Array.from({ length: 24 }, (_, i) => `<th>${i}</th>`).join('')}</tr>
+              <tr><th>日期</th><th>类型</th><th>合格时段</th>${Array.from({ length: 24 }, (_, i) => `<th>${i}</th>`).join('')}</tr>
             </thead>
             <tbody>
-              ${detailRows.map((r) => `<tr><td>${r.date}</td><td>${r.typeLabel}</td><td>${r.qualified}/${r.total}</td><td>${formatNumber(r.score)}</td>${r.ratios.map((v) => `<td>${formatPercentCell(v)}</td>`).join('')}</tr>`).join('')}
+              ${detailRows.map((r) => `<tr><td>${r.date}</td><td>${r.typeLabel}</td><td>${r.qualified}/${r.total}</td>${r.ratios.map((v) => `<td>${formatPercentCell(v)}</td>`).join('')}</tr>`).join('')}
             </tbody>
           </table>
         </div>
@@ -1592,9 +1594,11 @@
     const points = details.flatMap((row) => row.ratios.map((ratio, hour) => ({ date: row.date, type: row.type, hour, ratio })).filter((p) => isFiniteDataValue(p.ratio)));
     const total = details.reduce((sum, row) => sum + row.total, 0);
     const qualified = details.reduce((sum, row) => sum + row.qualified, 0);
+    const energyTotal = group.rows.reduce((sum, row) => sum + row.values.reduce((a, b) => a + Number(b || 0), 0), 0);
     return {
       userName: group.userName,
       month: group.month,
+      energyTotal: round(energyTotal, 6),
       days: details.length,
       baselines,
       details,
@@ -1614,11 +1618,51 @@
     let user = state.ui.quantUser || groups[0].userName;
     if (!groups.some((g) => g.userName === user)) user = groups[0].userName;
     let months = groups.filter((g) => g.userName === user).map((g) => g.month).sort();
-    let month = state.ui.quantMonth || months[0] || '';
-    if (!months.includes(month)) month = months[0] || '';
+    let month = state.ui.quantMonth || QUANT_ALL_MONTH_VALUE;
+    if (month !== QUANT_ALL_MONTH_VALUE && !months.includes(month)) month = QUANT_ALL_MONTH_VALUE;
     state.ui.quantUser = user;
     state.ui.quantMonth = month;
-    return { user, month, group: groups.find((g) => g.userName === user && g.month === month) || null };
+    const userGroups = groups.filter((g) => g.userName === user);
+    const group = month === QUANT_ALL_MONTH_VALUE
+      ? buildQuantAllGroup(user, userGroups)
+      : groups.find((g) => g.userName === user && g.month === month) || null;
+    return { user, month, group };
+  }
+
+  function buildQuantAllGroup(userName, groups) {
+    const details = (groups || []).flatMap((g) => g.details.map((r) => ({ ...r, month: g.month }))).sort((a, b) => {
+      const dateCompare = String(a.date || '').localeCompare(String(b.date || ''));
+      if (dateCompare) return dateCompare;
+      return String(a.month || '').localeCompare(String(b.month || ''));
+    });
+    const points = details.flatMap((row) => row.ratios.map((ratio, hour) => ({ date: row.date, type: row.type, hour, ratio })).filter((p) => isFiniteDataValue(p.ratio)));
+    const total = details.reduce((sum, row) => sum + row.total, 0);
+    const qualified = details.reduce((sum, row) => sum + row.qualified, 0);
+    const energyTotal = (groups || []).reduce((sum, group) => sum + Number(group.energyTotal || 0), 0);
+    return {
+      userName,
+      month: QUANT_ALL_MONTH_VALUE,
+      energyTotal: round(energyTotal, 6),
+      days: details.length,
+      baselines: {},
+      details,
+      points,
+      total,
+      qualified,
+      score: total ? round((qualified / total) * 100, 3) : 0
+    };
+  }
+
+  function quantSummaryRowsWithTotals(groups) {
+    const byUser = new Map();
+    for (const group of groups || []) {
+      if (!byUser.has(group.userName)) byUser.set(group.userName, []);
+      byUser.get(group.userName).push(group);
+    }
+    return [...byUser.entries()].flatMap(([userName, userGroups]) => [
+      buildQuantAllGroup(userName, userGroups),
+      ...userGroups.slice().sort((a, b) => a.month.localeCompare(b.month))
+    ]);
   }
 
   function quantDayType(date) {
@@ -4835,7 +4879,7 @@
     }
     for (let hour = 0; hour < 24; hour++) {
       const x = xForHour(hour);
-      if (hour % 2 === 0) ctx.fillText(String(hour), x - 4, h - 24);
+      ctx.fillText(String(hour), x - 4, h - 24);
     }
     ctx.strokeStyle = '#93a9a5';
     ctx.beginPath(); ctx.moveTo(pad.l, pad.t); ctx.lineTo(pad.l, pad.t + plotH); ctx.lineTo(w - pad.r, pad.t + plotH); ctx.stroke();
@@ -5230,14 +5274,15 @@
       name = '用户测算结果.xlsx';
     } else if (kind === 'quant') {
       const groups = quantAnalysisGroups();
+      const summaryRows = quantSummaryRowsWithTotals(groups);
       rows = [
         ['用户月份评分'],
-        ['用户', '月份', '天数', '合格时段', '总时段', '量化得分'],
-        ...groups.map((g) => [g.userName, g.month, g.days, g.qualified, g.total, g.score]),
+        ['用户', '月份', '月总用电量(MWh)', '天数', '合格时段', '总时段', '量化得分'],
+        ...summaryRows.map((g) => [g.userName, g.month === QUANT_ALL_MONTH_VALUE ? '加总' : g.month, g.energyTotal, g.days, g.qualified, g.total, g.score]),
         [],
         ['每日时段偏差'],
-        ['用户', '月份', '日期', '类型', '合格时段', '总时段', '日得分', ...Array.from({ length: 24 }, (_, i) => String(i))],
-        ...groups.flatMap((g) => g.details.map((r) => [g.userName, g.month, r.date, r.typeLabel, r.qualified, r.total, r.score, ...r.ratios.map((v) => isFiniteDataValue(v) ? round(Number(v) * 100, 2) : '')]))
+        ['用户', '月份', '日期', '类型', '合格时段', '总时段', ...Array.from({ length: 24 }, (_, i) => String(i))],
+        ...groups.flatMap((g) => g.details.map((r) => [g.userName, g.month, r.date, r.typeLabel, r.qualified, r.total, ...r.ratios.map((v) => isFiniteDataValue(v) ? round(Number(v) * 100, 2) : '')]))
       ];
       name = '用户量化结果.xlsx';
     }
@@ -5282,7 +5327,7 @@
       const firstGroup = quantAnalysisGroups()[0];
       if (firstGroup) {
         state.ui.quantUser = firstGroup.userName;
-        state.ui.quantMonth = firstGroup.month;
+        state.ui.quantMonth = QUANT_ALL_MONTH_VALUE;
       }
       persist();
       e.target.value = '';

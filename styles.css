@@ -92,6 +92,7 @@ canvas { width: 100%; height: auto; min-height: 360px; display: block; }
 .preview-note { color: var(--muted); font-size: 13px; margin-right: auto; }
 .download-ready { display: inline-flex; align-items: center; padding: 10px 14px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); color: var(--brand-2); text-decoration: none; }
 .import-btn { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.toolbar label.primary-btn.import-btn { color: white; }
 .import-preview-box { display: flex; flex-direction: column; gap: 0; }
 .import-preview-box textarea { min-height: 200px; }
 .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 12px; background: white; max-width: 100%; min-width: 0; }
