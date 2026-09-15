@@ -45,7 +45,10 @@
       quantMonth: '',
       quant2Rows: [],
       quant2User: '',
-      quant2Month: ''
+      quant2Month: '',
+      quant3Rows: [],
+      quant3User: '',
+      quant3Month: ''
     },
     data: clone(defaults),
     settingsOpen: false,
@@ -126,7 +129,7 @@
       const rawUi = localStorage.getItem(UI_STORAGE_KEY);
       if (rawData) state.data = merge(state.data, JSON.parse(rawData));
       if (rawUi) state.ui = { ...state.ui, ...JSON.parse(rawUi) };
-      if (['longTerm', 'agent', 'split', 'load', 'compare', 'quant', 'quant2'].includes(state.ui.activeTab)) state.tab = state.ui.activeTab;
+      if (['longTerm', 'agent', 'split', 'load', 'compare', 'quant', 'quant2', 'quant3'].includes(state.ui.activeTab)) state.tab = state.ui.activeTab;
     } catch (_) {}
   }
 
@@ -1169,7 +1172,8 @@
       ['load', '用户负荷数据'],
       ['compare', '价格对比'],
       ['quant', '用户评估'],
-      ['quant2', '用户评估2']
+      ['quant2', '用户评估2'],
+      ['quant3', '用户评估3']
     ];
     app.innerHTML = `
       <div class="shell">
@@ -1188,7 +1192,7 @@
               <h2>${pageTitle()}</h2>
             </div>
             <div class="actions">
-              <span class="pill">${state.tab === 'load' ? '电量单位：MWH' : ['quant', 'quant2'].includes(state.tab) ? '偏差单位：%' : '价格单位：元/MWh'}</span>
+              <span class="pill">${state.tab === 'load' ? '电量单位：MWH' : ['quant', 'quant2', 'quant3'].includes(state.tab) ? '偏差单位：%' : '价格单位：元/MWh'}</span>
               <button class="icon-btn" id="settingsBtn" title="设置">⚙</button>
             </div>
           </div>
@@ -1215,7 +1219,8 @@
       load: '用户负荷数据',
       compare: '价格对比',
       quant: '用户评估',
-      quant2: '用户评估2'
+      quant2: '用户评估2',
+      quant3: '用户评估3'
     }[state.tab];
   }
 
@@ -1224,7 +1229,7 @@
     if (state.tab === 'agent') return renderAgent();
     if (state.tab === 'split') return renderSplit();
     if (state.tab === 'compare') return renderCompare();
-    if (state.tab === 'quant' || state.tab === 'quant2') return renderQuant(state.tab);
+    if (state.tab === 'quant' || state.tab === 'quant2' || state.tab === 'quant3') return renderQuant(state.tab);
     return renderLoad();
   }
 
@@ -1585,6 +1590,22 @@
         exportName: '用户评估2结果.xlsx'
       };
     }
+    if (kind === 'quant3') {
+      return {
+        kind,
+        lowerLimit: 0.75,
+        lowerLine: 0.75,
+        upperLimit: 1.15,
+        lowerLabel: '75%',
+        upperLabel: '115%',
+        rangeLabel: '75% 至 115%',
+        fileInputId: 'quant3LoadFile',
+        userSelectId: 'quant3User',
+        monthSelectId: 'quant3Month',
+        chartId: 'quant3ScatterChart',
+        exportName: '用户评估3结果.xlsx'
+      };
+    }
     return {
       kind: 'quant',
       lowerLimit: QUANT_LOWER_LIMIT,
@@ -1602,7 +1623,7 @@
   }
 
   function quantStateKeys(kind = 'quant') {
-    const prefix = kind === 'quant2' ? 'quant2' : 'quant';
+    const prefix = kind === 'quant2' ? 'quant2' : kind === 'quant3' ? 'quant3' : 'quant';
     return {
       rows: `${prefix}Rows`,
       user: `${prefix}User`,
@@ -2283,7 +2304,7 @@
         scheduleRender();
       });
     }
-    if (state.tab === 'quant' || state.tab === 'quant2') {
+    if (state.tab === 'quant' || state.tab === 'quant2' || state.tab === 'quant3') {
       const kind = state.tab;
       const cfg = quantConfig(kind);
       const keys = quantStateKeys(kind);
@@ -5383,7 +5404,7 @@
       const temp = compareRowsForMonthlyLoad(state.ui.compareRows || []);
       rows = [['用户', '月份', ...Array.from({ length: 24 }, (_, i) => String(i)), '售电公司加权均价', '国网代购加权均价'], ...temp.map((r) => [r.userName, r.month, ...r.values, r.longAvg, r.agentAvg])];
       name = '用户测算结果.xlsx';
-    } else if (kind === 'quant' || kind === 'quant2') {
+    } else if (kind === 'quant' || kind === 'quant2' || kind === 'quant3') {
       const cfg = quantConfig(kind);
       const groups = quantAnalysisGroups(kind);
       const summaryRows = quantSummaryRowsWithTotals(groups);
