@@ -77,6 +77,26 @@
   const QUANT_LOWER_LINE = 0.8261;
   const QUANT_UPPER_LIMIT = 1.125;
   const QUANT_ALL_MONTH_VALUE = '__all__';
+  const CHINA_PUBLIC_HOLIDAY_RANGES = {
+    2025: [
+      ['2025-01-01', '2025-01-01'],
+      ['2025-01-28', '2025-02-04'],
+      ['2025-04-04', '2025-04-06'],
+      ['2025-05-01', '2025-05-05'],
+      ['2025-05-31', '2025-06-02'],
+      ['2025-10-01', '2025-10-08']
+    ],
+    2026: [
+      ['2026-01-01', '2026-01-03'],
+      ['2026-02-15', '2026-02-23'],
+      ['2026-04-04', '2026-04-06'],
+      ['2026-05-01', '2026-05-05'],
+      ['2026-06-19', '2026-06-21'],
+      ['2026-09-25', '2026-09-27'],
+      ['2026-10-01', '2026-10-07']
+    ]
+  };
+  const CHINA_PUBLIC_HOLIDAYS = buildDateSetFromRanges(CHINA_PUBLIC_HOLIDAY_RANGES);
 
   hydrate();
   ensureDataShape();
@@ -1145,7 +1165,7 @@
       ['split', '市场分摊'],
       ['load', '用户负荷数据'],
       ['compare', '价格对比'],
-      ['quant', '用户量化']
+      ['quant', '用户评估']
     ];
     app.innerHTML = `
       <div class="shell">
@@ -1190,7 +1210,7 @@
       split: '市场分摊',
       load: '用户负荷数据',
       compare: '价格对比',
-      quant: '用户量化'
+      quant: '用户评估'
     }[state.tab];
   }
 
@@ -1498,14 +1518,14 @@
       <div class="section controls-section">
         <div class="toolbar">
           <label class="primary-btn import-btn">导入Excel数据<input id="quantLoadFile" type="file" accept=".xlsx,.xls" multiple class="hidden" /></label>
-          <button class="ghost-btn" data-clear-quant-load>清除量化表</button>
+          <button class="ghost-btn" data-clear-quant-load>清除评估表</button>
           <button class="ghost-btn" data-export="quant">导出结果</button>
           <div class="group"><label>用户</label><select id="quantUser">${users.length ? users.map((u) => `<option value="${esc(u)}" ${u === selection.user ? 'selected' : ''}>${esc(u)}</option>`).join('') : '<option value="">暂无数据</option>'}</select></div>
           <div class="group"><label>月份</label><select id="quantMonth">${monthOptions.length ? monthOptions.map((m) => `<option value="${esc(m)}" ${m === selection.month ? 'selected' : ''}>${m === QUANT_ALL_MONTH_VALUE ? '加总' : esc(m)}</option>`).join('') : '<option value="">暂无数据</option>'}</select></div>
         </div>
       </div>
       <div class="grid-3">
-        <div class="kpi"><div class="label">量化得分</div><div class="value">${score}</div><div class="sub">满分 100</div></div>
+        <div class="kpi"><div class="label">评估得分</div><div class="value">${score}</div><div class="sub">满分 100</div></div>
         <div class="kpi"><div class="label">合格时段</div><div class="value">${qualified}</div><div class="sub">82.6% 至 112.5%</div></div>
         <div class="kpi"><div class="label">统计天数</div><div class="value">${selected?.days || 0}</div><div class="sub">散点 ${scatterCount} 个</div></div>
       </div>
@@ -1519,7 +1539,7 @@
         <h3>用户月份评分</h3>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>用户</th><th>月份</th><th>月总用电量(MWh)</th><th>天数</th><th>合格时段</th><th>总时段</th><th>量化得分</th></tr></thead>
+            <thead><tr><th>用户</th><th>月份</th><th>月总用电量(MWh)</th><th>天数</th><th>合格时段</th><th>总时段</th><th>评估得分</th></tr></thead>
             <tbody>
               ${summaryRows.map((g) => `<tr><td>${esc(g.userName)}</td><td>${g.month === QUANT_ALL_MONTH_VALUE ? '加总' : esc(g.month)}</td><td>${formatNumber(g.energyTotal)}</td><td>${g.days}</td><td>${g.qualified}</td><td>${g.total}</td><td>${formatNumber(g.score)}</td></tr>`).join('')}
             </tbody>
@@ -1534,7 +1554,7 @@
               <tr><th>日期</th><th>类型</th><th>合格时段</th>${Array.from({ length: 24 }, (_, i) => `<th>${i}</th>`).join('')}</tr>
             </thead>
             <tbody>
-              ${detailRows.map((r) => `<tr><td>${r.date}</td><td>${r.typeLabel}</td><td>${r.qualified}/${r.total}</td>${r.ratios.map((v) => `<td>${formatPercentCell(v)}</td>`).join('')}</tr>`).join('')}
+              ${detailRows.map((r) => `<tr><td>${r.date}</td><td>${r.typeLabel}</td><td>${r.total ? `${r.qualified}/${r.total}` : '/'}</td>${r.ratios.map((v) => `<td>${formatPercentCell(v)}</td>`).join('')}</tr>`).join('')}
             </tbody>
           </table>
         </div>
@@ -1552,9 +1572,11 @@
       if (!userName || !month || !/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
       const key = `${userName}__${month}`;
       if (!grouped.has(key)) grouped.set(key, { userName, month, rows: [] });
+      const isHoliday = isChinaPublicHoliday(date);
       grouped.get(key).rows.push({
         date,
         dayType: quantDayType(date),
+        isHoliday,
         values: resampleSeriesExact(row.points || [], 24).map((v) => Number(v || 0))
       });
     }
@@ -1569,22 +1591,24 @@
     const baselines = {};
     ['weekday', 'saturday', 'sunday'].forEach((type) => {
       baselines[type] = Array.from({ length: 24 }, (_, hour) => {
-        const values = group.rows.filter((r) => r.dayType === type).map((r) => r.values[hour]).filter(isFiniteDataValue).map(Number);
+        const values = group.rows.filter((r) => r.dayType === type && !r.isHoliday).map((r) => r.values[hour]).filter(isFiniteDataValue).map(Number);
         return values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
       });
     });
     const details = group.rows.slice().sort((a, b) => a.date.localeCompare(b.date)).map((row) => {
       const base = baselines[row.dayType] || [];
-      const ratios = row.values.map((value, hour) => {
-        const benchmark = Number(base[hour]);
-        return benchmark > 0 && isFiniteDataValue(value) ? Number(value) / benchmark : null;
-      });
+      const ratios = row.isHoliday
+        ? Array(24).fill(null)
+        : row.values.map((value, hour) => {
+          const benchmark = Number(base[hour]);
+          return benchmark > 0 && isFiniteDataValue(value) ? Number(value) / benchmark : null;
+        });
       const total = ratios.filter(isFiniteDataValue).length;
       const qualified = ratios.filter(isQualifiedDeviation).length;
       return {
         date: row.date,
         type: row.dayType,
-        typeLabel: quantDayTypeLabel(row.dayType),
+        typeLabel: quantDayTypeLabel(row.dayType, row.isHoliday),
         ratios,
         total,
         qualified,
@@ -1599,7 +1623,7 @@
       userName: group.userName,
       month: group.month,
       energyTotal: round(energyTotal, 6),
-      days: details.length,
+      days: details.filter((row) => row.total > 0).length,
       baselines,
       details,
       points,
@@ -1643,7 +1667,7 @@
       userName,
       month: QUANT_ALL_MONTH_VALUE,
       energyTotal: round(energyTotal, 6),
-      days: details.length,
+      days: details.filter((row) => row.total > 0).length,
       baselines: {},
       details,
       points,
@@ -1666,6 +1690,7 @@
   }
 
   function quantDayType(date) {
+    if (isChinaPublicHoliday(date)) return 'holiday';
     const match = String(date || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
     if (!match) return 'weekday';
     const day = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).getDay();
@@ -1674,8 +1699,35 @@
     return 'weekday';
   }
 
-  function quantDayTypeLabel(type) {
+  function quantDayTypeLabel(type, isHoliday = false) {
+    if (isHoliday || type === 'holiday') return '节假日';
     return type === 'saturday' ? '周六' : type === 'sunday' ? '周日' : '周一至周五';
+  }
+
+  function isChinaPublicHoliday(date) {
+    return CHINA_PUBLIC_HOLIDAYS.has(String(date || '').slice(0, 10));
+  }
+
+  function buildDateSetFromRanges(rangesByYear) {
+    const out = new Set();
+    Object.values(rangesByYear || {}).flat().forEach(([start, end]) => {
+      const current = parseDateParts(start);
+      const last = parseDateParts(end);
+      if (!current || !last) return;
+      const date = new Date(current.y, current.m - 1, current.d);
+      const endDate = new Date(last.y, last.m - 1, last.d);
+      while (date <= endDate) {
+        out.add(`${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`);
+        date.setDate(date.getDate() + 1);
+      }
+    });
+    return out;
+  }
+
+  function parseDateParts(date) {
+    const match = String(date || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return null;
+    return { y: Number(match[1]), m: Number(match[2]), d: Number(match[3]) };
   }
 
   function isQualifiedDeviation(v) {
@@ -5277,14 +5329,14 @@
       const summaryRows = quantSummaryRowsWithTotals(groups);
       rows = [
         ['用户月份评分'],
-        ['用户', '月份', '月总用电量(MWh)', '天数', '合格时段', '总时段', '量化得分'],
+        ['用户', '月份', '月总用电量(MWh)', '天数', '合格时段', '总时段', '评估得分'],
         ...summaryRows.map((g) => [g.userName, g.month === QUANT_ALL_MONTH_VALUE ? '加总' : g.month, g.energyTotal, g.days, g.qualified, g.total, g.score]),
         [],
         ['每日时段偏差'],
         ['用户', '月份', '日期', '类型', '合格时段', '总时段', ...Array.from({ length: 24 }, (_, i) => String(i))],
         ...groups.flatMap((g) => g.details.map((r) => [g.userName, g.month, r.date, r.typeLabel, r.qualified, r.total, ...r.ratios.map((v) => isFiniteDataValue(v) ? round(Number(v) * 100, 2) : '')]))
       ];
-      name = '用户量化结果.xlsx';
+      name = '用户评估结果.xlsx';
     }
     if (!rows.length) {
       alert('当前没有可导出的表格数据');
