@@ -40,12 +40,6 @@
       compareK: 0,
       compareLoadMode: '24',
       compareRows: [],
-      quantRows: [],
-      quantUser: '',
-      quantMonth: '',
-      quant2Rows: [],
-      quant2User: '',
-      quant2Month: '',
       quant3Rows: [],
       quant3User: '',
       quant3Month: ''
@@ -79,9 +73,6 @@
   let remoteAccessToken = readRemoteAccessToken();
   const TABLE_PREVIEW_LIMIT = 1000;
   const CHART_SERIES_LIMIT = 80;
-  const QUANT_LOWER_LIMIT = 0.826;
-  const QUANT_LOWER_LINE = 0.8261;
-  const QUANT_UPPER_LIMIT = 1.125;
   const QUANT_ALL_MONTH_VALUE = '__all__';
   const CHINA_PUBLIC_HOLIDAY_RANGES = {
     2025: [
@@ -129,7 +120,8 @@
       const rawUi = localStorage.getItem(UI_STORAGE_KEY);
       if (rawData) state.data = merge(state.data, JSON.parse(rawData));
       if (rawUi) state.ui = { ...state.ui, ...JSON.parse(rawUi) };
-      if (['longTerm', 'agent', 'split', 'load', 'compare', 'quant', 'quant2', 'quant3'].includes(state.ui.activeTab)) state.tab = state.ui.activeTab;
+      if (['quant', 'quant2'].includes(state.ui.activeTab)) state.ui.activeTab = 'quant3';
+      if (['longTerm', 'agent', 'split', 'load', 'compare', 'quant3'].includes(state.ui.activeTab)) state.tab = state.ui.activeTab;
     } catch (_) {}
   }
 
@@ -1171,9 +1163,7 @@
       ['split', '市场分摊'],
       ['load', '用户负荷数据'],
       ['compare', '价格对比'],
-      ['quant', '用户评估'],
-      ['quant2', '用户评估2'],
-      ['quant3', '用户评估3']
+      ['quant3', '山西用户评估']
     ];
     app.innerHTML = `
       <div class="shell">
@@ -1192,7 +1182,7 @@
               <h2>${pageTitle()}</h2>
             </div>
             <div class="actions">
-              <span class="pill">${state.tab === 'load' ? '电量单位：MWH' : ['quant', 'quant2', 'quant3'].includes(state.tab) ? '偏差单位：%' : '价格单位：元/MWh'}</span>
+              <span class="pill">${state.tab === 'load' ? '电量单位：MWH' : state.tab === 'quant3' ? '偏差单位：%' : '价格单位：元/MWh'}</span>
               <button class="icon-btn" id="settingsBtn" title="设置">⚙</button>
             </div>
           </div>
@@ -1218,9 +1208,7 @@
       split: '市场分摊',
       load: '用户负荷数据',
       compare: '价格对比',
-      quant: '用户评估',
-      quant2: '用户评估2',
-      quant3: '用户评估3'
+      quant3: '山西用户评估'
     }[state.tab];
   }
 
@@ -1229,7 +1217,7 @@
     if (state.tab === 'agent') return renderAgent();
     if (state.tab === 'split') return renderSplit();
     if (state.tab === 'compare') return renderCompare();
-    if (state.tab === 'quant' || state.tab === 'quant2' || state.tab === 'quant3') return renderQuant(state.tab);
+    if (state.tab === 'quant3') return renderQuant(state.tab);
     return renderLoad();
   }
 
@@ -1508,7 +1496,7 @@
     `;
   }
 
-  function renderQuant(kind = 'quant') {
+  function renderQuant(kind = 'quant3') {
     const cfg = quantConfig(kind);
     const groups = quantAnalysisGroups(kind);
     const selection = ensureQuantSelection(groups, kind);
@@ -1573,57 +1561,25 @@
     `;
   }
 
-  function quantConfig(kind = 'quant') {
-    if (kind === 'quant2') {
-      return {
-        kind,
-        lowerLimit: 0.5,
-        lowerLine: 0.5,
-        upperLimit: 1.5,
-        lowerLabel: '50%',
-        upperLabel: '150%',
-        rangeLabel: '50% 至 150%',
-        fileInputId: 'quant2LoadFile',
-        userSelectId: 'quant2User',
-        monthSelectId: 'quant2Month',
-        chartId: 'quant2ScatterChart',
-        exportName: '用户评估2结果.xlsx'
-      };
-    }
-    if (kind === 'quant3') {
-      return {
-        kind,
-        lowerLimit: 0.75,
-        lowerLine: 0.75,
-        upperLimit: 1.15,
-        lowerLabel: '75%',
-        upperLabel: '115%',
-        rangeLabel: '75% 至 115%',
-        fileInputId: 'quant3LoadFile',
-        userSelectId: 'quant3User',
-        monthSelectId: 'quant3Month',
-        chartId: 'quant3ScatterChart',
-        exportName: '用户评估3结果.xlsx'
-      };
-    }
+  function quantConfig(kind = 'quant3') {
     return {
-      kind: 'quant',
-      lowerLimit: QUANT_LOWER_LIMIT,
-      lowerLine: QUANT_LOWER_LINE,
-      upperLimit: QUANT_UPPER_LIMIT,
-      lowerLabel: '82.61%',
-      upperLabel: '112.5%',
-      rangeLabel: '82.6% 至 112.5%',
-      fileInputId: 'quantLoadFile',
-      userSelectId: 'quantUser',
-      monthSelectId: 'quantMonth',
-      chartId: 'quantScatterChart',
-      exportName: '用户评估结果.xlsx'
+      kind,
+      lowerLimit: 0.75,
+      lowerLine: 0.75,
+      upperLimit: 1.15,
+      lowerLabel: '75%',
+      upperLabel: '115%',
+      rangeLabel: '75% 至 115%',
+      fileInputId: 'quant3LoadFile',
+      userSelectId: 'quant3User',
+      monthSelectId: 'quant3Month',
+      chartId: 'quant3ScatterChart',
+      exportName: '山西用户评估结果.xlsx'
     };
   }
 
-  function quantStateKeys(kind = 'quant') {
-    const prefix = kind === 'quant2' ? 'quant2' : kind === 'quant3' ? 'quant3' : 'quant';
+  function quantStateKeys(kind = 'quant3') {
+    const prefix = 'quant3';
     return {
       rows: `${prefix}Rows`,
       user: `${prefix}User`,
@@ -1631,7 +1587,7 @@
     };
   }
 
-  function quantAnalysisGroups(kind = 'quant') {
+  function quantAnalysisGroups(kind = 'quant3') {
     const keys = quantStateKeys(kind);
     const source = aggregateLoad(state.ui[keys.rows] || []);
     const grouped = new Map();
@@ -1657,7 +1613,7 @@
     });
   }
 
-  function buildQuantGroup(group, kind = 'quant') {
+  function buildQuantGroup(group, kind = 'quant3') {
     const cfg = quantConfig(kind);
     const baselines = {};
     ['weekday', 'saturday', 'sunday'].forEach((type) => {
@@ -1704,7 +1660,7 @@
     };
   }
 
-  function ensureQuantSelection(groups, kind = 'quant') {
+  function ensureQuantSelection(groups, kind = 'quant3') {
     const keys = quantStateKeys(kind);
     if (!groups.length) {
       state.ui[keys.user] = '';
@@ -1802,7 +1758,7 @@
     return { y: Number(match[1]), m: Number(match[2]), d: Number(match[3]) };
   }
 
-  function isQualifiedDeviation(v, config = 'quant') {
+  function isQualifiedDeviation(v, config = 'quant3') {
     const cfg = typeof config === 'string' ? quantConfig(config) : config;
     return isFiniteDataValue(v) && Number(v) >= cfg.lowerLimit && Number(v) <= cfg.upperLimit;
   }
@@ -2304,7 +2260,7 @@
         scheduleRender();
       });
     }
-    if (state.tab === 'quant' || state.tab === 'quant2' || state.tab === 'quant3') {
+    if (state.tab === 'quant3') {
       const kind = state.tab;
       const cfg = quantConfig(kind);
       const keys = quantStateKeys(kind);
@@ -4974,7 +4930,7 @@
     return loadPointLabels96();
   }
 
-  function drawDeviationScatterChart(id, points, kind = 'quant') {
+  function drawDeviationScatterChart(id, points, kind = 'quant3') {
     const cfg = quantConfig(kind);
     const canvas = byId(id);
     if (!canvas) return;
@@ -5404,7 +5360,7 @@
       const temp = compareRowsForMonthlyLoad(state.ui.compareRows || []);
       rows = [['用户', '月份', ...Array.from({ length: 24 }, (_, i) => String(i)), '售电公司加权均价', '国网代购加权均价'], ...temp.map((r) => [r.userName, r.month, ...r.values, r.longAvg, r.agentAvg])];
       name = '用户测算结果.xlsx';
-    } else if (kind === 'quant' || kind === 'quant2' || kind === 'quant3') {
+    } else if (kind === 'quant3') {
       const cfg = quantConfig(kind);
       const groups = quantAnalysisGroups(kind);
       const summaryRows = quantSummaryRowsWithTotals(groups);
@@ -5445,7 +5401,7 @@
     }).catch((err) => alert('导入失败：' + err.message));
   }
 
-  function handleQuantImport(e, kind = 'quant') {
+  function handleQuantImport(e, kind = 'quant3') {
     const keys = quantStateKeys(kind);
     const files = [...(e.target.files || [])];
     if (!files.length) return;
